@@ -1,0 +1,763 @@
+/*
+g++  -Wall -std=c++11 -I/home/faysal/cryptopp/cpp-ethereum/eth/..   main.cpp -o ddd
+
+
+g++ -Wl,--no-as-needed -std=c++11 -pthread  main.cpp -o dsds $(pkg-config --cflags --libs libbitcoin) -I/home/faysal/cryptopp/cpp-ethereum/libdevcore/.. -I/home/faysal/cryptopp/cpp-ethereum/eth/.. 
+
+
+
+ g++ -Wl,--no-as-needed -std=c++11 -pthread FEKklogger.cpp  SBT.cpp -o radtr   $(pkg-config --cflags --libs libbitcoin) -I/home/faysal/Desktop/serioslib/RW/CPC
+
+ g++ -Wl,--no-as-needed -std=c++11 -pthread FEKklogger.cpp  NTB_MESSAGE_RECEIVE_.cpp -o radtr   $(pkg-config --cflags --libs libbitcoin) -I/home/faysal/Desktop/serioslib/RW/CPC
+
+ */
+
+/*
+ * Copyright (c) 2011-2013 libbitcoin developers (see AUTHORS)
+ *
+ * This file is part of libbitcoin.
+ *
+ * libbitcoin is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License with
+ * additional permissions to the one published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version. For more information see LICENSE.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+/*
+ Transaction/Object radars.
+ */
+ 
+ /* New implementation to capture the flow of transactions and blocks by Faysal El Khettabi 
+#include <bitcoin/bitcoin.hpp>
+#include <boost/asio.hpp>
+#include <stdio.h>      /* printf */
+#include <math.h>       /* klog */
+#include <iostream>
+#include <algorithm>
+#include <vector>
+#include <FEKklogger.hpp>
+
+
+using namespace bc;
+
+using std::placeholders::_1;
+using std::placeholders::_2;
+using std::placeholders::_3;
+using std::placeholders::_4;
+
+using namespace std;
+using namespace feklibbitcoin;
+
+void output_to_file(std::ofstream& file, feklibbitcoin::klog_klevel klevel,
+		const std::string& domain, const std::string& body);
+void output_cerr_and_file(std::ofstream& file,
+		feklibbitcoin::klog_klevel klevel, const std::string& domain,
+		const std::string& body);
+
+void output_to_file(std::ofstream& file, feklibbitcoin::klog_klevel klevel,
+		const std::string& domain, const std::string& body) {
+	if (body.empty())
+		return;
+	file << feklibbitcoin::klevel_repr(klevel);
+	if (!domain.empty())
+		file << " [" << domain << "]";
+	file << "" << body << std::endl;
+}
+void output_cerr_and_file(std::ofstream& file,
+		feklibbitcoin::klog_klevel klevel, const std::string& domain,
+		const std::string& body) {
+	if (body.empty())
+		return;
+	std::ostringstream output;
+	output << feklibbitcoin::klevel_repr(klevel);
+	if (!domain.empty())
+		output << " [" << domain << "]";
+	output << "" << body;
+	std::cerr << output.str() << std::endl;
+}
+
+threadpool pool(1);
+boost::asio::io_service::strand strand_(pool.service());
+hosts hst(pool);
+handshake hs(pool);
+network net(pool);
+protocol prot(pool, hst, hs, net);
+
+int CurrentConnections = 1;
+static hash_digest last_block_hash_ = null_hash;
+
+struct Tentry_count {
+	hash_digest tx_hash;
+	size_t count;
+// Timestamp of when transaction hash was first seen.
+	time_t timest;
+	float duration;
+};
+
+typedef std::vector<Tentry_count> Tentry_list;
+Tentry_list Tentries_;
+typedef std::vector<Tentry_count> TCentry_list;
+TCentry_list TCentries_;
+
+struct Bentry_count {
+	hash_digest tx_hash;
+	size_t count;
+	// Timestamp of when transaction hash was first seen.
+	time_t timest;
+	float duration;
+};
+
+typedef std::vector<Bentry_count> Bentry_list;
+Bentry_list Bentries_;
+typedef std::vector<Bentry_count> BCentry_list;
+BCentry_list BCentries_;
+
+// Watches transactions. Keeps a view count per seen tx hash, and
+// cleans up old expired tx hashes.
+class tx_watch: public async_strand {
+public:
+	tx_watch(time_t timeout = 0);
+
+	// Push a seen tx hash. If this entry exists then the count
+	// will be incremented.
+	// Else create a new entry in our list.
+	void Tpush(const hash_digest& tx_hash);
+	void Bpush(const hash_digest& tx_hash);
+	// Cleans up expired items. We could make this implicitly called
+	// by push() or display(), but single use methods with no side-effects
+	// is better code design.
+	void Tcleanup();
+	void Bcleanup();
+	void TCcleanup();
+	void BCcleanup();
+	// Display transactions and their count. A better design would be to
+	// separate the view from the model and instead provide a method which
+	// fetches a copy of our list, but we keep it simple here.
+	void display();
+	/*
+	 private:
+	 struct entry_count
+	 {
+	 hash_digest tx_hash;
+	 size_t count;
+	 // Timestamp of when transaction hash was first seen.
+	 time_t timest;
+	 float duration;
+	 std::vector<hash_digest> Merkle;
+	 };
+
+	 typedef std::vector<entry_count> entry_list;
+	 */
+	// The public methods push these methods to the threadpool to be
+	// executed and then return immediately.
+	// async_strand::queue() is a helper method which posts the work
+	// to the threadpool and serializes access.
+	// No 2 operations posted through the same async_strand using queue()
+	// will execute at the same time.
+	void do_Tpush(const hash_digest& tx_hash);
+	void do_Tcleanup();
+	void do_TCcleanup();
+	void do_Bpush(const hash_digest& tx_hash);
+	void do_Bcleanup();
+	void do_BCcleanup();
+	void do_display();
+
+	// entry_list entries_;
+	// Time until an entry is ready to be removed.
+	time_t timeout_;
+
+};
+
+tx_watch::tx_watch(time_t timeout) :
+		async_strand(pool), timeout_(timeout) {
+}
+
+void tx_watch::Tpush(const hash_digest& tx_hash) {
+	queue(std::bind(&tx_watch::do_Tpush, this, tx_hash));
+	// Returns immediately.
+}
+void tx_watch::Bpush(const hash_digest& tx_hash) {
+	queue(std::bind(&tx_watch::do_Bpush, this, tx_hash));
+	// Returns immediately.
+}
+void tx_watch::do_Tpush(const hash_digest& tx_hash) {
+
+	// If tx_hash is found then increment count...
+	bool Tis_found = false;
+	for (Tentry_count& Tentry : Tentries_) {       // Tentry.duration=-1;
+		if (Tentry.tx_hash == tx_hash) {
+			++Tentry.count;
+			Tentry.duration = (time(nullptr) - Tentry.timest) / 1.0;
+			Tis_found = true;
+			TCentries_.push_back( { tx_hash, Tentry.count, time(nullptr) });
+		}
+	}
+	// Else create a new entry with a count of 1.
+	if (!Tis_found) {
+		Tentries_.push_back( { tx_hash, 1, time(nullptr) });
+		TCentries_.push_back( { tx_hash, 1, time(nullptr) });
+	}
+
+}
+
+void tx_watch::do_Bpush(const hash_digest& tx_hash) {
+	// If tx_hash is found then increment count...
+	bool Bis_found = false;
+	for (Bentry_count& Bentry : Bentries_) {       // Bentry.duration =-1;     
+		if (Bentry.tx_hash == tx_hash) {
+			++Bentry.count;
+			Bentry.duration = (time(nullptr) - Bentry.timest) / 1.0;
+			Bis_found = true;
+			BCentries_.push_back( { tx_hash, Bentry.count, time(nullptr) });
+		}
+	}
+	// Else create a new entry with a count of 1.
+	if (!Bis_found) {
+		Bentries_.push_back( { tx_hash, 1, time(nullptr) });
+		BCentries_.push_back( { tx_hash, 1, time(nullptr) });
+	}
+}
+
+void tx_watch::Tcleanup() {
+	queue(std::bind(&tx_watch::do_Tcleanup, this));
+}
+
+void tx_watch::TCcleanup() {
+	queue(std::bind(&tx_watch::do_TCcleanup, this));
+}
+
+void tx_watch::Bcleanup() {
+	queue(std::bind(&tx_watch::do_Bcleanup, this));
+}
+void tx_watch::BCcleanup() {
+	queue(std::bind(&tx_watch::do_BCcleanup, this));
+}
+
+void tx_watch::do_Tcleanup() {
+	// Erase entries where timest is older than (now - timeout_) seconds.
+	time_t current_time = time(nullptr);
+	auto erase_pred = [&](const Tentry_count& entry)
+	{
+		return (current_time - entry.timest) > timeout_;
+	};
+	auto erase_begin = std::remove_if(Tentries_.begin(), Tentries_.end(),
+			erase_pred);
+	// If we have old entries to delete then erase them.
+	if (erase_begin != Tentries_.end())
+		Tentries_.erase(erase_begin);
+}
+void tx_watch::do_TCcleanup() {
+	// Erase entries where timest is older than (now - timeout_) seconds.
+	time_t current_time = time(nullptr);
+	auto erase_pred = [&](const Tentry_count& entry)
+	{
+		return (current_time - entry.timest) > timeout_;
+	};
+	auto erase_begin = std::remove_if(TCentries_.begin(), TCentries_.end(),
+			erase_pred);
+	// If we have old entries to delete then erase them.
+	if (erase_begin != TCentries_.end())
+		TCentries_.erase(erase_begin);
+}
+
+void tx_watch::do_BCcleanup() {
+	// Erase entries where timest is older than (now - timeout_) seconds.
+	time_t current_time = time(nullptr);
+	auto erase_pred = [&](const Bentry_count& Bentry)
+	{
+		return (current_time - Bentry.timest) > 3*timeout_;
+	};
+	auto erase_begin = std::remove_if(BCentries_.begin(), BCentries_.end(),
+			erase_pred);
+	// If we have old entries to delete then erase them.
+	if (erase_begin != BCentries_.end())
+		BCentries_.erase(erase_begin);
+}
+
+void tx_watch::do_Bcleanup() {
+	// Erase entries where timest is older than (now - timeout_) seconds.
+	time_t current_time = time(nullptr);
+	auto erase_pred = [&](const Bentry_count& Bentry)
+	{
+		return (current_time - Bentry.timest) > 3*timeout_;
+	};
+	auto erase_begin = std::remove_if(Bentries_.begin(), Bentries_.end(),
+			erase_pred);
+	// If we have old entries to delete then erase them.
+	if (erase_begin != Bentries_.end())
+		Bentries_.erase(erase_begin);
+}
+
+void tx_watch::display() {
+	queue(std::bind(&tx_watch::do_display, this));
+}
+void tx_watch::do_display() {
+
+	// Remove Duplicate Entries
+	//  auto last = std::unique(Tentries_.begin(), Tentries_.end());
+	//   Tentries_.erase(last, Tentries_.end());
+	// Sort entries by count. Highest numbers at the top.
+	std::sort(Tentries_.begin(), Tentries_.end(),
+			[](const Tentry_count& Tentry_a, const Tentry_count& Tentry_b)
+			{
+				return Tentry_a.count > Tentry_b.count;
+			});
+	// Display the first 20 entries.
+	// for (size_t i = 0; i < 200 && i < entries_.size(); ++i)
+	for (size_t i = 0; i < Tentries_.size(); ++i) {
+		const Tentry_count& Tentry = Tentries_[i];
+		//     CurrentConnections=Tentries_[i].count;
+		if (Tentry.count > CurrentConnections / 2.0) {
+			int xxs = 0; //// // feklibbitcoin::klog_results_t() << "_T_" << i << " " << Tentry.tx_hash << " "<< (0.0 + Tentry.count) / 1.0 << " " << Tentry.duration << " " << Tentry.timest;
+		}
+	}
+	for (size_t i = 0; i < TCentries_.size(); ++i) {
+		const Tentry_count& Tentry = TCentries_[i];
+		//     CurrentConnections=Tentries_[i].count;
+		if (Tentry.count > CurrentConnections / 2.0) {
+			int yyy = 0;
+			//// // feklibbitcoin::klog_results_t() << "_TC_" << i << " " << Tentry.tx_hash << " "<< (0.0 + Tentry.count) / 1.0 << " " << Tentry.duration << " " << Tentry.timest;
+		}
+	}
+	//feklibbitcoin::klog_info() << "   ";
+	// Remove Duplicate Entries
+	//auto last = std::unique(Bentries_.begin(), Bentries_.end());
+	//Bentries_.erase(last, Bentries_.end());
+	// Sort entries by count. Highest numbers at the top.
+	std::sort(Bentries_.begin(), Bentries_.end(),
+			[](const Bentry_count& Bentry_a, const Bentry_count& Bentry_b)
+			{
+				return Bentry_a.count > Bentry_b.count;
+			});
+	// Display the first 20 entries.
+	// for (size_t i = 0; i < 200 && i < entries_.size(); ++i)
+	for (size_t i = 0; i < Bentries_.size(); ++i) {
+		const Bentry_count& Bentry = Bentries_[i];
+		if (Bentry.count > CurrentConnections / 2.0)
+			int JHF = 0;
+		/*  // // feklibbitcoin::klog_results_b() << "_B_" <<  i << " " << Bentry.tx_hash << " " << (0.0 + Bentry.count) / 1.0 << //" " << Bentry.duration << " " << Bentry.timest; */
+
+	}
+	for (size_t i = 0; i < BCentries_.size(); ++i) {
+		const Bentry_count& Bentry = BCentries_[i];
+		if (Bentry.count > CurrentConnections / 2.0)
+			int fgdt = 0;
+		// // // // feklibbitcoin::klog_results_b() << "_BC_" <<  i << " " << Bentry.tx_hash << " " << (0.0 + Bentry.count) / 1.0 << " " << Bentry.duration << " " << Bentry.timest;
+	}
+	//feklibbitcoin::klog_info() << "   ";
+
+}
+
+// We don't have a database open, and aren't doing any critical file
+// operations so we aren't worried about exiting suddenly.
+
+void connection_started(const std::error_code& ec, channel_ptr node,
+		protocol& prot, tx_watch& watch,handshake& hs);
+void inventory_received(const std::error_code& ec, const inventory_type& inv,
+		channel_ptr node);
+void recv_blc(const std::error_code& ec, const block_type& blc,
+		channel_ptr node);
+void recv_tx(const std::error_code& ec, const transaction_type& tx,
+		channel_ptr node);
+void receive_block(const std::error_code& ec, const block_type& blc,
+		channel_ptr node);
+void receive_inv(const std::error_code& ec, const inventory_type& packet,
+		channel_ptr node, tx_watch& watch);
+void display_number_of_connections(const std::error_code& ec,
+		size_t connection_count);
+void receive_transaction(const std::error_code& ec, const transaction_type& blc,
+		channel_ptr node);
+void receive_raw(const std::error_code& ec, const header_type& headtype, const data_chunk& datachunk,channel_ptr node);
+void show_ip(const std::error_code& ec, const network_address_type& addr);
+void receive_address(const std::error_code& ec, const address_type& addr,channel_ptr node);
+
+void check_error(const std::error_code& ec) {
+	if (!ec)
+		return;
+	feklibbitcoin::klog_fatal() << ec.message();
+	exit(-1);
+}
+void display_number_of_connections(const std::error_code& ec,
+		size_t connection_count) {
+
+	check_error(ec);
+	time_t current_time = time(nullptr);
+	feklibbitcoin::klog_debug() << " " << connection_count << " CONNECTIONS"
+			<< "_@_" << current_time;
+	CurrentConnections = connection_count;
+}
+
+// Needed for the C callback capturing the signals.
+bool stopped = false;
+void signal_handler(int sig) {
+	feklibbitcoin::klog_info() << "Caught signal: " << sig;
+	stopped = true;
+}
+
+// Started protocol. Node discovery complete.
+void handle_start(const std::error_code& ec) {
+	check_error(ec);
+}
+
+
+void show_ip(const std::error_code& ec, const network_address_type& addr)
+{
+    if (ec)
+        // error_exit(ec.message());
+        log_fatal() << "Error: " << ec.message();
+//std::cout<< "IP " << pretty(addr.ip) << std::endl;
+}
+
+
+void connection_started(const std::error_code& ec, channel_ptr node,
+		protocol& prot, tx_watch& watch, handshake& hs) {
+	if (ec) {
+		feklibbitcoin::klog_warning() << "Couldn't start connection: "
+				<< ec.message();
+		return;
+	}
+	feklibbitcoin::klog_info() << "Connection established.";
+	// Subscribe to inventory packets.
+        node->subscribe_raw((std::bind(receive_raw, _1, _2,_3, node)));
+	node->subscribe_inventory(
+			strand_.wrap(
+					std::bind(receive_inv, _1, _2, node, std::ref(watch))));
+	node->subscribe_block((std::bind(receive_block, _1, _2, node)));
+	node->subscribe_transaction((std::bind(receive_transaction, _1, _2, node)));
+       // node->subscribe_address((std::bind(receive_address, _1, _2, node)));
+
+	// Resubscribe to new nodes.
+	prot.subscribe_channel(
+			std::bind(connection_started, _1, _2, std::ref(prot),
+					std::ref(watch),std::ref(hs)));
+	prot.fetch_connection_count(display_number_of_connections);
+       // hs.fetch_network_address(show_ip);
+
+}
+
+static std::string pretty(const ip_address_type& ip)
+{
+    std::ostringstream oss;
+    oss << (int)ip[12] << '.' << (int)ip[13] << '.'
+        << (int)ip[14] << '.' << (int)ip[15];
+    return oss.str();
+}
+
+
+void receive_address(const std::error_code& ec, const address_type& addr,channel_ptr node) {
+	if (ec) 
+{
+		//feklibbitcoin::klog_error() << "Received bad IP: " << ec.message();
+		return;
+}
+
+for (int n = 0; n < addr.addresses.size(); n++)
+{
+feklibbitcoin::klog_results_t() << "_IP_" << pretty(addr.addresses[n].ip) << "_" << addr.addresses[n].timestamp << "_" << time(nullptr) ; //; //<< " " << &node;
+}
+node->subscribe_address(std::bind(receive_address, _1, _2, node));
+
+}
+
+
+
+
+void receive_raw(const std::error_code& ec, const header_type& headtype, const data_chunk& datachunk,channel_ptr node
+) {
+	if (ec) {
+		feklibbitcoin::klog_error() << "Received bad raw: " << ec.message();
+		return;
+	}
+vector<string> Listbitcoinmessages={"version","verack","addr","getaddr","inv","getdata","getblocks","tx","block"};
+            for (int index=0; index < Listbitcoinmessages.size(); ++index) {
+                if( headtype.command == Listbitcoinmessages[index] )
+{
+ feklibbitcoin::klog_results_b() << headtype.command << "_" << time(nullptr) ;
+}}
+
+
+// << " " << headtype.command << " " << headtype.payload_length;
+
+ // std::cout << "_HOC_" << time(nullptr) << " " << headtype.magic << " " << headtype.command << " " << headtype.payload_length << std::endl;  
+//// // feklibbitcoin::klog_results_b() << "_DOC_" << time(nullptr) << " " << datachunk.size() ; //<< " " << satoshi_command(datachunk);
+
+node->subscribe_raw((std::bind(receive_raw, _1, _2,_3, node)));
+}
+
+
+void handle_send_packet(const std::error_code& ec) {
+	if (ec)
+		std::cout << "Send problem: " << ec.message() << " " << std::endl;
+}
+
+void receive_inv(const std::error_code& ec, const inventory_type& packet,
+		channel_ptr node, tx_watch& watch) {
+	if (ec) {
+		std::cout << "Received bad inventory: " << ec.message();
+		return;
+	}
+
+	// Filter out only block inventories
+	get_data_type getdata;
+	for (const inventory_vector_type& ivv : packet.inventories) {
+
+// We're only interested in Transactions and Blocks. Discard everything else.
+		if (ivv.type == inventory_type_id::transaction) {
+// std::cout << " STORE THIS TRANSACTION INSIDE NEW MODEL" << "\n";
+			watch.Tpush(ivv.hash);
+			getdata.inventories.push_back(ivv);
+			feklibbitcoin::klog_results_t() << "_TOC_" << time(nullptr) ; //; //<< " " << &node;
+
+		}
+		if (ivv.type == inventory_type_id::block) {
+			watch.Bpush(ivv.hash);
+			feklibbitcoin::klog_results_t() << "_BOC_" << time(nullptr) ; //; //<< " " << &node;
+
+// Already got this block
+//if (ivv.hash == last_block_hash_)
+				//continue;
+
+			getdata.inventories.push_back(ivv);
+//std::cout << " NBH  INSIDE NEW MODEL " << ivv.hash << " OBH  INSIDE NEW MODEL " << last_block_hash_ << " \n";
+		}
+	}
+
+	if (!getdata.inventories.empty()) {
+		last_block_hash_ = getdata.inventories.back().hash;
+		node->send(getdata, handle_send_packet);
+	}
+	node->subscribe_inventory(
+			strand_.wrap(
+					std::bind(receive_inv, _1, _2, node, std::ref(watch))));
+
+}
+
+
+
+
+void receive_block(const std::error_code& ec, const block_type& blc,
+		channel_ptr node) {
+	if (ec) {
+		feklibbitcoin::klog_error() << "Received bad block: " << ec.message();
+		return;
+	}
+
+feklibbitcoin::klog_results_t() << "_RBR_" << time(nullptr) ; //; //<< " " << &node;
+feklibbitcoin::klog_results_t() << "_RBNT_" << blc.transactions.size() ; //; //<< " " << &node;
+
+/*
+	for (size_t i = 0; i < Bentries_.size(); ++i) {
+		const Bentry_count& Bentry = Bentries_[i];
+		hash_digest tx_hashx = hash_block_header(blc.header);
+		if (Bentry.tx_hash == tx_hashx
+				&& Bentry.count > CurrentConnections / 2.0) {
+
+feklibbitcoin::klog_results_t() << "_NSHVPM_" << blc.header.nonce << " " << blc.transactions.size() << " " << encode_hex(hash_block_header(blc.header)) << " " << blc.header.version << " " << blc.header.previous_block_hash << " " << blc.header.merkle; 
+			for (int n = 0; n < blc.transactions.size(); n++)
+
+			{
+
+				//transaction_type tx=blc.transactions[n];
+
+				for (transaction_input_type input : blc.transactions[n].inputs) {
+
+					//// // feklibbitcoin::klog_results_t() << "_I_PH_" << input.previous_output.hash;
+
+					const operation_stack& opers = input.script.operations();
+					std::ostringstream ss;
+					for (auto it = opers.begin(); it != opers.end(); ++it) {
+						if (it != opers.begin())
+							ss << " ";
+						const operation& op = *it;
+						if (op.data.empty())
+							ss << opcode_to_string(op.code);
+						else
+							int re = 0;
+						// // // feklibbitcoin::klog_results_t() << "_I_SPK_" << encode_hex(op.data);
+					}
+
+				}
+
+				for (transaction_output_type output : blc.transactions[n].outputs) {
+					const operation_stack& opers = output.script.operations();
+					std::ostringstream ss;
+					for (auto it = opers.begin(); it != opers.end(); ++it) {
+						if (it != opers.begin())
+							ss << " ";
+						const operation& op = *it;
+						if (op.data.empty())
+							ss << opcode_to_string(op.code);
+						else
+							int uyt = 0;
+						//// // feklibbitcoin::klog_results_t() << "_O_A_" << encode_hex(op.data);
+					}
+					//// // feklibbitcoin::klog_results_t() << "_O_V_" << output.value ;
+				}
+
+			}
+		}
+	}
+*/
+	node->subscribe_block(std::bind(receive_block, _1, _2, node));
+
+}
+
+
+
+void receive_transaction(const std::error_code& ec, const transaction_type& tr,
+		channel_ptr node) {
+	if (ec) {
+		feklibbitcoin::klog_error() << "Received bad transaction: "
+				<< ec.message();
+		return;
+	}
+
+                     // std::cout << node->lookup_symbol() << std::lendl;
+
+	if (tr.inputs.size() > 0) 
+	{
+float Totalvalue=0;
+feklibbitcoin::klog_results_t() << "_RTR_" << time(nullptr) ; //; //<< " " << &node;
+feklibbitcoin::klog_results_t() << "_RTNI_" << tr.inputs.size() ; //; //<< " " << &node;;
+feklibbitcoin::klog_results_t() << "_RTNO_" << tr.outputs.size() << "_" << tr.locktime ; 
+
+			for (transaction_input_type input : tr.inputs) {
+if( input.sequence < 4294967295)
+{
+feklibbitcoin::klog_results_t() << "_SEQ_" << input.sequence;
+std::cin.get();
+}
+				const operation_stack& opers = input.script.operations();
+				for (auto it = opers.begin(); it != opers.end(); ++it) {
+
+                                        const operation& opa = *it;
+feklibbitcoin::klog_results_t() << "_I_SPK_" << encode_hex(opa.data);
+
+				}
+			}
+
+			for (transaction_output_type output : tr.outputs) {
+const operation_stack& opers = output.script.operations();
+// std::cout << "sizeout" << opers.size() << std::endl;
+
+for (auto it = opers.begin(); it != opers.end(); ++it) 
+{
+
+				const operation& op = *it;
+
+/*if (op.code == opcode::checksig) 
+
+{ std::cout << "opcode::checksig " << opers.size()  << std::endl;
+std::cout << opcode_to_string(op.code) << opers.size()  << std::endl;
+int jxi=0;
+for (auto it = opers.begin(); it != opers.end(); ++it) 
+{
+jxi=jxi+1;
+				const operation& op = *it;
+          std::cout << opcode_to_string(op.code) << " " << jxi << " "  <<  opers.size()  << std::endl;
+if (!op.data.empty())
+{
+std::cout <<  encode_hex(op.data) << " " << jxi << " "  <<  opers.size()  << std::endl;
+}
+}
+
+std::cin.get();
+}
+
+if (op.code == opcode::checkmultisig)
+              {std::cout << "opcode::checkmultisig " << opers.size()  << std::endl;
+
+std::cout << opcode_to_string(op.code) << opers.size()  << std::endl;
+int jxi=0;
+for (auto it = opers.begin(); it != opers.end(); ++it) 
+{
+jxi=jxi+1;
+				const operation& op = *it;
+          std::cout << opcode_to_string(op.code) << " " << jxi << " "  <<  opers.size()  << std::endl;
+if (!op.data.empty())
+{
+std::cout <<  encode_hex(op.data) << " " << jxi << " "  <<  opers.size()  << std::endl;
+}
+}
+
+std::cin.get();
+}
+
+// if (op.code == opcode::equal){ std::cout << "opcode::equal " << opers.size()  << std::endl;}
+*/
+
+if (!op.data.empty())
+{
+feklibbitcoin::klog_results_t() << "_O_A_" << encode_hex(op.data);
+}
+
+}
+
+Totalvalue=Totalvalue+output.value;
+feklibbitcoin::klog_results_t() << "_TOV_" << output.value/100000000.0 ; //<< " " << &node;
+			}
+
+feklibbitcoin::klog_results_t() << "_RTV_" << time(nullptr) << " " << Totalvalue/100000000.0 << " " << encode_hex(hash_transaction(tr)); //; //<< " " << &node;
+}
+node->subscribe_transaction(std::bind(receive_transaction, _1, _2, node));
+
+}
+
+int main() {
+
+using namespace feklibbitcoin;
+
+std::ofstream outfile("/home/faysal/Desktop/serioslib/debug.klog"), errfile("error.klog"), resultsfile("/home/faysal/Desktop/serioslib/results.klog"),resultsfileINV("/home/faysal/Desktop/serioslib/resultsINV.klog"),resultsfileIP("/home/faysal/Desktop/serioslib/resultsINV.klog");
+
+
+feklibbitcoin::klog_debug().set_output_function(
+	std::bind(output_to_file, std::ref(outfile), _1, _2, _3));
+
+feklibbitcoin::klog_info().set_output_function(
+	std::bind(output_to_file, std::ref(outfile), _1, _2, _3));
+
+feklibbitcoin::klog_warning().set_output_function(
+	std::bind(output_to_file, std::ref(errfile), _1, _2, _3));
+
+feklibbitcoin::klog_error().set_output_function(
+	std::bind(output_cerr_and_file, std::ref(errfile), _1, _2, _3));
+
+feklibbitcoin::klog_fatal().set_output_function(
+	std::bind(output_cerr_and_file, std::ref(errfile), _1, _2, _3));
+
+ feklibbitcoin::klog_results_b().set_output_function( std::bind(output_to_file, std::ref(resultsfile), _1, _2, _3));
+ feklibbitcoin::klog_results_t().set_output_function( std::bind(output_to_file, std::ref(resultsfileINV), _1, _2, _3));
+// feklibbitcoin::klog_results_i().set_output_function( std::bind(output_to_file, std::ref(resultsfileIP), _1, _2, _3));
+// // feklibbitcoin::klog_results_t().set_output_function( std::bind(output_to_file, std::ref(resultsfile), _1, _2, _3));
+
+tx_watch watch(0);
+prot.start(handle_start);
+prot.subscribe_channel(
+	std::bind(connection_started, _1, _2, std::ref(prot), std::ref(watch),std::ref(hs) ));
+
+	// Catch C signals for stopping the program.
+signal(SIGABRT, signal_handler);
+signal(SIGTERM, signal_handler);
+signal(SIGINT, signal_handler);
+while (!stopped) {
+watch.Tcleanup();
+watch.Bcleanup();
+watch.TCcleanup();
+watch.BCcleanup();
+watch.display();
+std::this_thread::sleep_for(std::chrono::seconds(10));
+}
+	// Safely close down.
+std::cin.get();
+pool.stop();
+pool.join();
+return 0;
+}
